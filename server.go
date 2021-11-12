@@ -216,11 +216,14 @@ func main() {
       panic(err)
     }
     producer = producerPtr
-    deliveryChan := make(chan kafka.Event, 10000)
     go HandleProduceEvent(producer)
 
-    SynchronousProduce(producer, topics[0], "Sync pub")
-    err = ProduceMessage(producer, deliveryChan, "Hello world!", topics[0])
+    // Uncomment to verify that a single, local publish works.
+    // SynchronousProduce(producer, topics[0], "Sync pub")
+
+    // Uncomment to verify that a single async message publish works.
+    // deliveryChan := make(chan kafka.Event, 10000)
+    // err = ProduceMessage(producer, deliveryChan, "Hello world!", topics[0])
     if err != nil {
       panic(err)
     } else {
