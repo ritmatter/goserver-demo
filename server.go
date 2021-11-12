@@ -15,11 +15,12 @@ import (
 var db *sql.DB
 var enableDatabase bool
 var enableKafka bool
+var topics []string
 var upgrader = websocket.Upgrader {
   ReadBufferSize:  1024,
   WriteBufferSize: 1024,
 }
-
+var conns []*websocket.Conn
 var consumer *kafka.Consumer
 var producer *kafka.Producer
 var deliveryChan chan kafka.Event
@@ -31,8 +32,14 @@ func PollConsumer(c *kafka.Consumer) {
     ev := c.Poll(1000)
     switch e := ev.(type) {
       case *kafka.Message:
-          fmt.Printf("%% Message on %s:\n%s\n",
-              e.TopicPartition, string(e.Value))
+        fmt.Printf("%% Message on %s:\n%s\n", e.TopicPartition, string(e.Value))
+        for _, conn := range conns {
+          if err := conn.WriteMessage(websocket.TextMessage, e.Value); err != nil {
+            log.Println(err)
+            return
+          }
+        }
+
       case kafka.PartitionEOF:
           fmt.Printf("%% Reached %v\n", e)
       case kafka.Error:
@@ -134,12 +141,19 @@ func reader(conn *websocket.Conn) {
     }
 
     // Print message.
-    fmt.Println("Received message: `" + string(p) + "`")
+    fmt.Println("Received client message: `" + string(p) + "`")
 
     response := "Ack: " + string(p)
     if err := conn.WriteMessage(messageType, []byte(response)); err != nil {
         log.Println(err)
         return
+    }
+
+    // Publish the message so other listeners will get it.
+    // TODO: Avoid the sender receiving the message they just sent.
+    err = ProduceMessage(producer, deliveryChan, string(p), topics[0])
+    if err != nil {
+      panic(err)
     }
   }
 }
@@ -156,6 +170,7 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
 
   // Log statement to show that client connected.
   log.Println("Client Connected")
+  conns = append(conns, ws)
 
   // Write a hello message to the client.
   err = ws.WriteMessage(1, []byte("Greetings client."))
@@ -203,7 +218,7 @@ func main() {
 
   enableKafka = *enableKafkaPtr
   if (enableKafka) {
-    topics := []string{*kafkaTopicPtr}
+    topics = []string{*kafkaTopicPtr}
     consumerPtr, err := CreateConsumer(&topics, *kafkaBrokerServerPtr)
     if err != nil {
       panic(err)
