@@ -21,49 +21,8 @@ var upgrader = websocket.Upgrader {
   WriteBufferSize: 1024,
 }
 var conns []*websocket.Conn
-var consumer *kafka.Consumer
 var producer *kafka.Producer
 var deliveryChan chan kafka.Event
-
-// Indefinitely polls a consumer.
-func PollConsumer(c *kafka.Consumer) {
-  run := true
-  for run == true {
-    ev := c.Poll(1000)
-    switch e := ev.(type) {
-      case *kafka.Message:
-        fmt.Printf("%% Message on %s:\n%s\n", e.TopicPartition, string(e.Value))
-        for _, conn := range conns {
-          if err := conn.WriteMessage(websocket.TextMessage, e.Value); err != nil {
-            log.Println(err)
-            return
-          }
-        }
-
-      case kafka.PartitionEOF:
-          fmt.Printf("%% Reached %v\n", e)
-      case kafka.Error:
-          fmt.Fprintf(os.Stderr, "%% Error: %v\n", e)
-          run = false
-      default:
-          fmt.Printf("Ignored %v\n", e)
-    }
-  }
-}
-
-// Creates a kafka consumer and subscribes to topics.
-func CreateConsumer(topics *[]string, brokerServer string) (*kafka.Consumer, error) {
-  consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
-     "bootstrap.servers":    brokerServer,
-     "group.id":             "foo",
-     "auto.offset.reset":    "smallest"})
-  if err != nil {
-    return consumer, err
-  }
-
-  err = consumer.SubscribeTopics(*topics, nil)
-  return consumer, err
-}
 
 // Creates a kafka producer.
 func CreateProducer(brokerServer string) (*kafka.Producer, error) {
@@ -149,11 +108,13 @@ func reader(conn *websocket.Conn) {
         return
     }
 
-    // Publish the message so other listeners will get it.
-    // TODO: Avoid the sender receiving the message they just sent.
-    err = ProduceMessage(producer, deliveryChan, string(p), topics[0])
-    if err != nil {
-      panic(err)
+    if enableKafka {
+      // Publish the message so other listeners will get it.
+      // TODO: Avoid the sender receiving the message they just sent.
+      err = ProduceMessage(producer, deliveryChan, string(p), topics[0])
+      if err != nil {
+        panic(err)
+      }
     }
   }
 }
@@ -212,19 +173,14 @@ func main() {
   fmt.Println("Starting up!")
   enableDatabasePtr := flag.Bool("enableDatabase", false, "Whether to use the database.")
   enableKafkaPtr := flag.Bool("enableKafka", false, "Whether to use Kafka messaging.")
-  kafkaBrokerServerPtr := flag.String("kafkaBrokerServer", "", "The kafka broker information.")
+  kafkaBrokerServerPtr := flag.String("kafkaBrokerServer", "host.docker.internal:9092", "The kafka broker information.")
   kafkaTopicPtr := flag.String("kafkaTopic", "AwsChatTopic", "The kafka topic")
+  clientDirPtr := flag.String("clientDir", "./client/", "The directory with client files.")
   flag.Parse()
 
   enableKafka = *enableKafkaPtr
   if (enableKafka) {
     topics = []string{*kafkaTopicPtr}
-    consumerPtr, err := CreateConsumer(&topics, *kafkaBrokerServerPtr)
-    if err != nil {
-      panic(err)
-    }
-    consumer = consumerPtr
-    go PollConsumer(consumer)
 
     producerPtr, err := CreateProducer(*kafkaBrokerServerPtr)
     if err != nil {
@@ -244,7 +200,9 @@ func main() {
     } else {
       fmt.Println("Successfully produced message.")
     }
-    fmt.Println("Initialized Kafka producer and consumer.")
+    fmt.Println("Initialized Kafka producer.")
+  } else {
+    fmt.Println("Skipping kafka initialization")
   }
 
   enableDatabase = *enableDatabasePtr
@@ -280,7 +238,8 @@ func main() {
    fmt.Println("Skipping database connection")
   }
 
-  http.HandleFunc("/", ShowWords)
+  http.Handle("/", http.FileServer(http.Dir(*clientDirPtr)))
+  http.HandleFunc("/words", ShowWords)
   http.HandleFunc("/ws", OpenWebsocket)
   err := http.ListenAndServe(":3000", nil)
   fmt.Println("Serving on port 3000")

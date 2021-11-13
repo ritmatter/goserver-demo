@@ -2,14 +2,17 @@ FROM golang:1.17-alpine
 
 WORKDIR /app
 
+RUN apk add build-base
+
 COPY go.mod ./
 COPY go.sum ./
+COPY client/ ./
 
 RUN go mod download
 
 COPY *.go ./
 
-RUN go build -o /docker-goserver
+RUN go build -tags musl -o /docker-goserver
 
 EXPOSE 3000
 
