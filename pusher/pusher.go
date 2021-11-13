@@ -1,10 +1,21 @@
 package main
 import (
+  "bytes"
+  "context"
+  "encoding/json"
   "flag"
   "fmt"
   "github.com/confluentinc/confluent-kafka-go/kafka"
+  "github.com/go-redis/redis/v8"
+  "io/ioutil"
+  "log"
+  "net/http"
   "os"
 )
+
+var rdb *redis.Client
+
+var ctx = context.Background()
 
 // Creates a kafka consumer and subscribes to topics.
 func CreateConsumer(topics *[]string, brokerServer string, groupId string) (*kafka.Consumer, error) {
@@ -25,6 +36,8 @@ func main() {
   kafkaTopicPtr := flag.String("kafkaTopic", "AwsChatTopic", "The kafka topic")
   consumerGroupIdPtr := flag.String("consumerGroupId", "consumer", "The consumer group ID.")
   kafkaBrokerServerPtr := flag.String("kafkaBrokerServer", "host.docker.internal:9092", "The kafka broker information.")
+  enableRedisPtr := flag.Bool("enableRedis", false, "Whether to enable Redis session store.")
+  sessionStorePtr := flag.String("sessionStoreAddr", "host.docker.internal:6379", "Address of the session store.")
   flag.Parse()
 
   topics := []string{*kafkaTopicPtr}
@@ -33,20 +46,50 @@ func main() {
     panic(err)
   }
 
+  enableRedis := *enableRedisPtr
+  if enableRedis {
+    rdb = redis.NewClient(&redis.Options{
+        Addr:     *sessionStorePtr,
+        Password: "", // no password set
+        DB:       0,  // use default DB
+    })
+  }
+
   run := true
   for run == true {
-    ev := consumer.Poll(1000)
+    ev := consumer.Poll(100)
     switch e := ev.(type) {
       case *kafka.Message:
         fmt.Printf("%% Message on %s:\n%s\n", e.TopicPartition, string(e.Value))
 
-        // TODO: Send requests to all the chat servers to push the message.
-//        for _, conn := range conns {
-//          if err := conn.WriteMessage(websocket.TextMessage, e.Value); err != nil {
-//            log.Println(err)
-//            return
-//          }
-//        }
+        if rdb != nil {
+          // TODO: Support more chat rooms than just "public".
+          addresses,err := rdb.SMembers(ctx, "public").Result()
+          if err != nil {
+            panic(err)
+          }
+          fmt.Println(addresses)
+          for _, address := range addresses {
+           fmt.Println(address)
+           postBody, _ := json.Marshal(map[string]string{
+              "message":  string(e.Value),
+           })
+           requestBody := bytes.NewBuffer(postBody)
+           resp, err := http.Post("http://" + address, "application/json", requestBody)
+           if err != nil {
+             fmt.Println(err)
+             continue
+           }
+           defer resp.Body.Close()
+
+           body, err := ioutil.ReadAll(resp.Body)
+           if err != nil {
+              log.Fatalln(err)
+           }
+           sb := string(body)
+           log.Printf(sb)
+          }
+        }
 
       case kafka.PartitionEOF:
           fmt.Printf("%% Reached %v\n", e)
@@ -54,7 +97,6 @@ func main() {
           fmt.Fprintf(os.Stderr, "%% Error: %v\n", e)
           run = false
       default:
-          fmt.Printf("Ignored %v\n", e)
     }
   }
   consumer.Close()

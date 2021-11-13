@@ -1,11 +1,15 @@
 package main
 import (
+  "context"
   "database/sql"
   "flag"
   "fmt"
   _ "github.com/lib/pq"
   "github.com/confluentinc/confluent-kafka-go/kafka"
   "github.com/gorilla/websocket"
+  "github.com/go-redis/redis/v8"
+  "io/ioutil"
+  "net"
   "net/http"
   "log"
   "os"
@@ -13,6 +17,7 @@ import (
 )
 
 var db *sql.DB
+var rdb *redis.Client
 var enableDatabase bool
 var enableKafka bool
 var topics []string
@@ -24,18 +29,21 @@ var conns []*websocket.Conn
 var producer *kafka.Producer
 var deliveryChan chan kafka.Event
 
+// Request context.
+var ctx = context.Background()
+
+// Address of this server.
+var address string
+
+// Port accepting message pushes.
+var pushPort int
+
 // Creates a kafka producer.
 func CreateProducer(brokerServer string) (*kafka.Producer, error) {
-	hostname, err := os.Hostname()
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-  fmt.Println("Got hostname: " + hostname)
 
   return kafka.NewProducer(&kafka.ConfigMap{
     "bootstrap.servers": brokerServer,
-    "client.id": hostname,
+    "client.id": address,
     "acks": "all"})
 }
 
@@ -93,7 +101,7 @@ func SynchronousProduce(p *kafka.Producer, topic string, value string) {
 func reader(conn *websocket.Conn) {
   for {
     // Read message.
-    messageType, p, err := conn.ReadMessage()
+    _, p, err := conn.ReadMessage()
     if err != nil {
         log.Println(err)
         return
@@ -102,11 +110,11 @@ func reader(conn *websocket.Conn) {
     // Print message.
     fmt.Println("Received client message: `" + string(p) + "`")
 
-    response := "Ack: " + string(p)
-    if err := conn.WriteMessage(messageType, []byte(response)); err != nil {
-        log.Println(err)
-        return
-    }
+    //response := "Ack: " + string(p)
+    //if err := conn.WriteMessage(messageType, []byte(response)); err != nil {
+    //    log.Println(err)
+    //    return
+    //}
 
     if enableKafka {
       // Publish the message so other listeners will get it.
@@ -133,6 +141,15 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
   log.Println("Client Connected")
   conns = append(conns, ws)
 
+  // If redis is enabled, add the client to the session store.
+  // TODO: Support adding for specific chat rooms, not just "public".
+  if rdb != nil {
+    err := rdb.SAdd(ctx, "public", address + ":" + strconv.Itoa(pushPort), 0).Err()
+    if err != nil {
+        panic(err)
+    } 
+  }
+
   // Write a hello message to the client.
   err = ws.WriteMessage(1, []byte("Greetings client."))
   if err != nil {
@@ -141,6 +158,26 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
 
   // Permanently read from this websocket.
   reader(ws)
+}
+
+func HandlePush(w http.ResponseWriter, req *http.Request) {
+  fmt.Println("Handling push!")
+  // TODO: Check the room before pushing to every conn.
+  for _, conn := range conns {
+    defer req.Body.Close()
+    body, err := ioutil.ReadAll(req.Body)
+    if err != nil {
+      panic(err)
+    }
+
+    // Remove dead connections.
+    err = conn.WriteMessage(websocket.TextMessage, body)
+    if err != nil {
+      fmt.Println(err)
+    }
+  }
+
+  fmt.Fprint(w, "Successfully pushed the message.")
 }
 
 func ShowWords(w http.ResponseWriter, req *http.Request) {
@@ -173,10 +210,41 @@ func main() {
   fmt.Println("Starting up!")
   enableDatabasePtr := flag.Bool("enableDatabase", false, "Whether to use the database.")
   enableKafkaPtr := flag.Bool("enableKafka", false, "Whether to use Kafka messaging.")
+  enableRedisPtr := flag.Bool("enableRedis", false, "Whether to enable Redis session store.")
   kafkaBrokerServerPtr := flag.String("kafkaBrokerServer", "host.docker.internal:9092", "The kafka broker information.")
   kafkaTopicPtr := flag.String("kafkaTopic", "AwsChatTopic", "The kafka topic")
   clientDirPtr := flag.String("clientDir", "./client/", "The directory with client files.")
+  sessionStorePtr := flag.String("sessionStoreAddr", "host.docker.internal:6379", "Address of the session store.")
+  pushPortPtr := flag.Int("pushPort", 8080, "Port on which to accept message pushes")
   flag.Parse()
+
+	hostname, err := os.Hostname()
+	if err != nil {
+    panic(err)
+	}
+  addr, err := net.LookupIP(hostname)
+  if err != nil {
+    panic(err)
+  }
+
+  if len(addr) < 1 {
+    panic("Error no IP addresses found.")
+  }
+
+  address = addr[0].String()
+
+  fmt.Println("Got address: " + address)
+  pushPort = *pushPortPtr
+  fmt.Println("Got push port: " + strconv.Itoa(pushPort))
+
+  enableRedis := *enableRedisPtr
+  if enableRedis {
+    rdb = redis.NewClient(&redis.Options{
+        Addr:     *sessionStorePtr,
+        Password: "", // no password set
+        DB:       0,  // use default DB
+    })
+  }
 
   enableKafka = *enableKafkaPtr
   if (enableKafka) {
@@ -195,11 +263,11 @@ func main() {
     // Uncomment to verify that a single async message publish works.
     // deliveryChan := make(chan kafka.Event, 10000)
     // err = ProduceMessage(producer, deliveryChan, "Hello world!", topics[0])
-    if err != nil {
-      panic(err)
-    } else {
-      fmt.Println("Successfully produced message.")
-    }
+    //if err != nil {
+    //  panic(err)
+    //} else {
+    //  fmt.Println("Successfully produced message.")
+    //}
     fmt.Println("Initialized Kafka producer.")
   } else {
     fmt.Println("Skipping kafka initialization")
@@ -238,11 +306,21 @@ func main() {
    fmt.Println("Skipping database connection")
   }
 
-  http.Handle("/", http.FileServer(http.Dir(*clientDirPtr)))
-  http.HandleFunc("/words", ShowWords)
-  http.HandleFunc("/ws", OpenWebsocket)
-  err := http.ListenAndServe(":3000", nil)
-  fmt.Println("Serving on port 3000")
+  mxUserHttp := http.NewServeMux()
+  mxUserHttp.Handle("/", http.FileServer(http.Dir(*clientDirPtr)))
+  mxUserHttp.HandleFunc("/words", ShowWords)
+  mxUserHttp.HandleFunc("/ws", OpenWebsocket)
+  go func() {
+    err := http.ListenAndServe(":3000", mxUserHttp)
+    if err != nil {
+      log.Fatal("ListenAndServe: ", err.Error())
+    }
+  }()
+
+  pushPortStr := strconv.Itoa(pushPort)
+  mxPushHttp := http.NewServeMux()
+  mxPushHttp.HandleFunc("/", HandlePush)
+  err = http.ListenAndServe(":" + pushPortStr, mxPushHttp)
   if err != nil {
     log.Fatal("ListenAndServe: ", err.Error())
   }
