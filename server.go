@@ -2,10 +2,12 @@ package main
 import (
   "context"
   "database/sql"
+  "encoding/json"
   "flag"
   "fmt"
   _ "github.com/lib/pq"
   "github.com/confluentinc/confluent-kafka-go/kafka"
+  "github.com/google/uuid"
   "github.com/gorilla/websocket"
   "github.com/go-redis/redis/v8"
   "io/ioutil"
@@ -14,6 +16,7 @@ import (
   "log"
   "os"
   "strconv"
+  "time"
 )
 
 var db *sql.DB
@@ -25,7 +28,7 @@ var upgrader = websocket.Upgrader {
   ReadBufferSize:  1024,
   WriteBufferSize: 1024,
 }
-var conns []*websocket.Conn
+var conns map[string]*websocket.Conn
 var producer *kafka.Producer
 var deliveryChan chan kafka.Event
 
@@ -38,6 +41,16 @@ var address string
 // Port accepting message pushes.
 var pushPort int
 
+// Define constants for websocket handling.
+const (
+	// Time allowed to read the next pong message from the client.
+	pongWait = 60 * time.Second
+)
+
+type PushRequest struct {
+    message map[string]string
+}
+
 // Creates a kafka producer.
 func CreateProducer(brokerServer string) (*kafka.Producer, error) {
 
@@ -48,11 +61,11 @@ func CreateProducer(brokerServer string) (*kafka.Producer, error) {
 }
 
 // Producers a message with the given producer.
-func ProduceMessage(p *kafka.Producer, deliveryChan chan kafka.Event, value string, topic string) error {
-  fmt.Println("Producing message: " + value + " for topic: " + topic)
+func ProduceMessage(p *kafka.Producer, deliveryChan chan kafka.Event, value []byte, topic string) error {
+  fmt.Println("Producing message: " + string(value) + " for topic: " + topic)
   return p.Produce(&kafka.Message{
       TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
-      Value: []byte(value)},
+      Value: value},
       deliveryChan,
   )
 }
@@ -98,33 +111,43 @@ func SynchronousProduce(p *kafka.Producer, topic string, value string) {
 }
 
 // Reader that receives web socket messages
-func reader(conn *websocket.Conn) {
+func reader(conn *websocket.Conn, conn_id string) {
   for {
-    // Read message.
     _, p, err := conn.ReadMessage()
     if err != nil {
         log.Println(err)
-        return
+        break
     }
 
-    // Print message.
-    fmt.Println("Received client message: `" + string(p) + "`")
-
-    //response := "Ack: " + string(p)
-    //if err := conn.WriteMessage(messageType, []byte(response)); err != nil {
-    //    log.Println(err)
-    //    return
-    //}
-
     if enableKafka {
+      message := make(map[string]string)
+      message["conn_id"] = conn_id
+      message["value"] = string(p)
+
+      message_bytes, err := json.Marshal(message)
+      if err != nil {
+        panic(err)
+      }
+
       // Publish the message so other listeners will get it.
       // TODO: Avoid the sender receiving the message they just sent.
-      err = ProduceMessage(producer, deliveryChan, string(p), topics[0])
+      err = ProduceMessage(producer, deliveryChan, message_bytes, topics[0])
       if err != nil {
         panic(err)
       }
     }
   }
+
+  HandleClose(conn, conn_id)
+}
+
+// Handles cleanup when a connection is closed.
+func HandleClose(conn *websocket.Conn, conn_id string) {
+  conn.Close()
+  delete (conns, conn_id)
+
+  // TODO: If no longer any listeners for a given room, remove
+  // this server as a participant in the room.
 }
 
 func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
@@ -137,9 +160,15 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
       log.Println(err)
   }
 
+	ws.SetReadLimit(512)
+	ws.SetReadDeadline(time.Now().Add(pongWait))
+	ws.SetPongHandler(func(string) error { ws.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+
   // Log statement to show that client connected.
   log.Println("Client Connected")
-  conns = append(conns, ws)
+
+  conn_id := uuid.New().String()
+  conns[conn_id] = ws
 
   // If redis is enabled, add the client to the session store.
   // TODO: Support adding for specific chat rooms, not just "public".
@@ -147,7 +176,7 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
     err := rdb.SAdd(ctx, "public", address + ":" + strconv.Itoa(pushPort), 0).Err()
     if err != nil {
         panic(err)
-    } 
+    }
   }
 
   // Write a hello message to the client.
@@ -157,21 +186,37 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
   }
 
   // Permanently read from this websocket.
-  reader(ws)
+  reader(ws, conn_id)
 }
 
 func HandlePush(w http.ResponseWriter, req *http.Request) {
   fmt.Println("Handling push!")
-  // TODO: Check the room before pushing to every conn.
-  for _, conn := range conns {
-    defer req.Body.Close()
-    body, err := ioutil.ReadAll(req.Body)
-    if err != nil {
-      panic(err)
-    }
+  defer req.Body.Close()
+  body, err := ioutil.ReadAll(req.Body)
+  if err != nil {
+    panic(err)
+  }
 
-    // Remove dead connections.
-    err = conn.WriteMessage(websocket.TextMessage, body)
+  // TODO: Use proto instead of json.
+  var body_json map[string]string
+  err = json.Unmarshal(body, &body_json)
+  if err != nil {
+    panic(err)
+  }
+
+  message := body_json["message"]
+
+  var message_json map[string]string
+  err = json.Unmarshal([]byte(message), &message_json)
+  if err != nil {
+    panic(err)
+  }
+  // TODO: Check the room before pushing to every conn.
+  // TODO: Handle concurrency websocket writes, right now
+  // there could be two concurrent pushes.
+  for _, conn := range conns {
+    value := message_json["value"]
+    err = conn.WriteMessage(websocket.TextMessage, []byte(value))
     if err != nil {
       fmt.Println(err)
     }
@@ -236,6 +281,8 @@ func main() {
   fmt.Println("Got address: " + address)
   pushPort = *pushPortPtr
   fmt.Println("Got push port: " + strconv.Itoa(pushPort))
+
+  conns = make(map[string]*websocket.Conn)
 
   enableRedis := *enableRedisPtr
   if enableRedis {

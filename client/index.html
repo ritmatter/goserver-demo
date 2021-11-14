@@ -34,11 +34,14 @@
         };
 
         socket.onmessage = message => {
-            console.log("Socket Server Message: ", message);
+            let li = document.createElement('li');
+            li.innerHTML = message.data;
+            document.getElementById('messages').appendChild(li);
         };
 
     </script>
     <input type="text" id="message" name="message">
     <input class="send-button" type="button" value="Send" onclick="return sendMessage()">
+    <ul id='messages'></ul>
   </body>
 </html>
