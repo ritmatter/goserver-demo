@@ -19,6 +19,7 @@ import (
   "time"
 )
 
+var maxConnections int
 var db *sql.DB
 var rdb *redis.Client
 var enableDatabase bool
@@ -160,6 +161,16 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
       log.Println(err)
   }
 
+  // If there are too many connections, end the connection. This is better than
+  // rejecting the connection because it allows us to tell the client what happened.
+  // See https://stackoverflow.com/questions/21762596/how-to-read-status-code-from-rejected-websocket-opening-handshake-with-javascrip
+  if len(conns) >= maxConnections {
+   // TODO: Distinguish between app-layer messages and user messages.
+    ws.WriteMessage(1, []byte("Maximum connections, please try again later."))
+    ws.Close()
+    return
+  }
+
 	ws.SetReadLimit(512)
 	ws.SetReadDeadline(time.Now().Add(pongWait))
 	ws.SetPongHandler(func(string) error { ws.SetReadDeadline(time.Now().Add(pongWait)); return nil })
@@ -262,7 +273,10 @@ func main() {
   sessionStorePtr := flag.String("sessionStoreAddr", "host.docker.internal:6379", "Address of the session store.")
   pushPortPtr := flag.Int("pushPort", 8080, "Port on which to accept message pushes")
   userPortPtr := flag.Int("userPort", 3000, "Port on which to accept user traffic")
+  maxConnectionsPtr := flag.Int("maxConnections", 3, "Maximum connections to accept")
   flag.Parse()
+
+  maxConnections = *maxConnectionsPtr
 
 	hostname, err := os.Hostname()
 	if err != nil {
