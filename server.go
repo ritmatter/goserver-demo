@@ -111,6 +111,14 @@ func SynchronousProduce(p *kafka.Producer, topic string, value string) {
   close(delivery_chan)
 }
 
+// Writes a message into the database.
+func PersistMessage(text string) (sql.Result, error)  {
+  sqlStatement := `
+  INSERT INTO messages (timestamp, text)
+  VALUES (NOW(), $1)`
+  return db.Exec(sqlStatement, text)
+}
+
 // Reader that receives web socket messages
 func reader(conn *websocket.Conn, conn_id string) {
   for {
@@ -120,10 +128,18 @@ func reader(conn *websocket.Conn, conn_id string) {
         break
     }
 
+    text := string(p)
+    if enableDatabase {
+      _, err = PersistMessage(text)
+      if err != nil {
+        panic(err)
+      }
+    }
+
     if enableKafka {
       message := make(map[string]string)
       message["conn_id"] = conn_id
-      message["value"] = string(p)
+      message["value"] = text
 
       message_bytes, err := json.Marshal(message)
       if err != nil {
@@ -263,8 +279,6 @@ func ShowWords(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
-  fmt.Println("Starting up!")
-  enableDatabasePtr := flag.Bool("enableDatabase", false, "Whether to use the database.")
   enableKafkaPtr := flag.Bool("enableKafka", false, "Whether to use Kafka messaging.")
   enableRedisPtr := flag.Bool("enableRedis", false, "Whether to enable Redis session store.")
   kafkaBrokerServerPtr := flag.String("kafkaBrokerServer", "host.docker.internal:9092", "The kafka broker information.")
@@ -274,6 +288,14 @@ func main() {
   pushPortPtr := flag.Int("pushPort", 8080, "Port on which to accept message pushes")
   userPortPtr := flag.Int("userPort", 3000, "Port on which to accept user traffic")
   maxConnectionsPtr := flag.Int("maxConnections", 3, "Maximum connections to accept")
+
+  // Database args.
+  enableDatabasePtr := flag.Bool("enableDatabase", false, "Whether to use the database.")
+  databaseHostPtr := flag.String("databaseHost", "", "Database host.")
+  databasePortPtr := flag.Int("databasePort", 5432, "Database port.")
+  databaseUserPtr := flag.String("databaseUser", "", "Database user.")
+  databasePasswordPtr := flag.String("databasePassword", "", "Database password.")
+  databaseNamePtr := flag.String("databaseName", "", "Database name.")
   flag.Parse()
 
   maxConnections = *maxConnectionsPtr
@@ -337,15 +359,11 @@ func main() {
 
   enableDatabase = *enableDatabasePtr
   if (enableDatabase) {
-    host := os.Args[1]
-    port, err := strconv.Atoi(os.Args[2])
-    if err != nil {
-      panic(err)
-    }
-
-    user := os.Args[3]
-    password := os.Args[4]
-    dbname := os.Args[5]
+    host := *databaseHostPtr
+    port := *databasePortPtr
+    user := *databaseUserPtr
+    password := *databasePasswordPtr
+    dbname := *databaseNamePtr
 
     psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
       "password=%s dbname=%s sslmode=disable",
