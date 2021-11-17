@@ -2,11 +2,9 @@ package main
 import (
   "context"
   "database/sql"
-  "encoding/json"
   "flag"
   "fmt"
   _ "github.com/lib/pq"
-  "github.com/confluentinc/confluent-kafka-go/kafka"
   "github.com/google/uuid"
   "github.com/gorilla/websocket"
   "github.com/go-redis/redis/v8"
@@ -23,15 +21,12 @@ var maxConnections int
 var db *sql.DB
 var rdb *redis.Client
 var enableDatabase bool
-var enableKafka bool
 var topics []string
 var upgrader = websocket.Upgrader {
   ReadBufferSize:  1024,
   WriteBufferSize: 1024,
 }
 var conns map[string]*websocket.Conn
-var producer *kafka.Producer
-var deliveryChan chan kafka.Event
 
 // Request context.
 var ctx = context.Background()
@@ -46,77 +41,22 @@ var pushPort int
 const (
 	// Time allowed to read the next pong message from the client.
 	pongWait = 60 * time.Second
+
+  // Default channel ID for testing.
+  defaultChannelId = "3f333df6-90a4-4fda-8dd3-9485d27cee36"
 )
 
 type PushRequest struct {
     message map[string]string
 }
 
-// Creates a kafka producer.
-func CreateProducer(brokerServer string) (*kafka.Producer, error) {
-
-  return kafka.NewProducer(&kafka.ConfigMap{
-    "bootstrap.servers": brokerServer,
-    "client.id": address,
-    "acks": "all"})
-}
-
-// Producers a message with the given producer.
-func ProduceMessage(p *kafka.Producer, deliveryChan chan kafka.Event, value []byte, topic string) error {
-  fmt.Println("Producing message: " + string(value) + " for topic: " + topic)
-  return p.Produce(&kafka.Message{
-      TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
-      Value: value},
-      deliveryChan,
-  )
-}
-
-// Handle a produce event for a given producer.
-// Create a go routine with this func for async writes.
-func HandleProduceEvent(p *kafka.Producer) {
-  for e := range p.Events() {
-      switch ev := e.(type) {
-      case *kafka.Message:
-          if ev.TopicPartition.Error != nil {
-              fmt.Printf("Failed to deliver message: %v\n", ev.TopicPartition)
-          } else {
-              fmt.Printf("Successfully produced record to topic %s partition [%d] @ offset %v\n",
-                  *ev.TopicPartition.Topic, ev.TopicPartition.Partition, ev.TopicPartition.Offset)
-          }
-      }
-  }
-}
-
-// Produces a message synchronously. Useful for testing.
-func SynchronousProduce(p *kafka.Producer, topic string, value string) {
-  delivery_chan := make(chan kafka.Event, 10000)
-  err := p.Produce(&kafka.Message{
-      TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
-      Value: []byte(value)},
-      delivery_chan)
-  if err != nil {
-   panic(err)
-  }
-
-  e := <-delivery_chan
-  m := e.(*kafka.Message)
-
-  fmt.Println("Examining result of delivery")
-  if m.TopicPartition.Error != nil {
-    fmt.Printf("Delivery failed: %v\n", m.TopicPartition.Error)
-  } else {
-    fmt.Printf("Delivered message to topic %s [%d] at offset %v\n",
-               *m.TopicPartition.Topic, m.TopicPartition.Partition, m.TopicPartition.Offset)
-  }
-  close(delivery_chan)
-}
-
 // Writes a message into the database.
 func PersistMessage(text string) (sql.Result, error)  {
   sqlStatement := `
-  INSERT INTO messages (timestamp, text)
-  VALUES (NOW(), $1)`
-  return db.Exec(sqlStatement, text)
+  INSERT INTO messages (channel_id, text)
+  VALUES ($1, $2)`
+
+  return db.Exec(sqlStatement, defaultChannelId, text)
 }
 
 // Reader that receives web socket messages
@@ -135,24 +75,6 @@ func reader(conn *websocket.Conn, conn_id string) {
         panic(err)
       }
     }
-
-    if enableKafka {
-      message := make(map[string]string)
-      message["conn_id"] = conn_id
-      message["value"] = text
-
-      message_bytes, err := json.Marshal(message)
-      if err != nil {
-        panic(err)
-      }
-
-      // Publish the message so other listeners will get it.
-      // TODO: Avoid the sender receiving the message they just sent.
-      err = ProduceMessage(producer, deliveryChan, message_bytes, topics[0])
-      if err != nil {
-        panic(err)
-      }
-    }
   }
 
   HandleClose(conn, conn_id)
@@ -163,8 +85,8 @@ func HandleClose(conn *websocket.Conn, conn_id string) {
   conn.Close()
   delete (conns, conn_id)
 
-  // TODO: If no longer any listeners for a given room, remove
-  // this server as a participant in the room.
+  // TODO: If no longer any listeners for a given channel, remove
+  // this server as a participant in the channel.
 }
 
 func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
@@ -198,10 +120,11 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
   conns[conn_id] = ws
 
   // If redis is enabled, add the client to the session store.
-  // TODO: Support adding for specific chat rooms, not just "public".
+  // TODO: Support adding for specific chat channels, not just "public".
   if rdb != nil {
     err := rdb.SAdd(ctx, "public", address + ":" + strconv.Itoa(pushPort), 0).Err()
     if err != nil {
+        log.Println("Error connecting to redis.")
         panic(err)
     }
   }
@@ -209,7 +132,7 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
   // Write a hello message to the client.
   err = ws.WriteMessage(1, []byte("Greetings client."))
   if err != nil {
-      log.Println(err)
+    log.Println(err)
   }
 
   // Permanently read from this websocket.
@@ -217,39 +140,23 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
 }
 
 func HandlePush(w http.ResponseWriter, req *http.Request) {
-  fmt.Println("Handling push!")
   defer req.Body.Close()
   body, err := ioutil.ReadAll(req.Body)
   if err != nil {
     panic(err)
   }
 
-  // TODO: Use proto instead of json.
-  var body_json map[string]string
-  err = json.Unmarshal(body, &body_json)
-  if err != nil {
-    panic(err)
-  }
-
-  message := body_json["message"]
-
-  var message_json map[string]string
-  err = json.Unmarshal([]byte(message), &message_json)
-  if err != nil {
-    panic(err)
-  }
-  // TODO: Check the room before pushing to every conn.
+  // TODO: Check the channel before pushing to every conn.
   // TODO: Handle concurrency websocket writes, right now
   // there could be two concurrent pushes.
   for _, conn := range conns {
-    value := message_json["value"]
-    err = conn.WriteMessage(websocket.TextMessage, []byte(value))
+    err = conn.WriteMessage(websocket.TextMessage, []byte(body))
     if err != nil {
       fmt.Println(err)
     }
   }
 
-  fmt.Fprint(w, "Successfully pushed the message.")
+  fmt.Fprint(w, "Push OK.")
 }
 
 func ShowWords(w http.ResponseWriter, req *http.Request) {
@@ -279,10 +186,7 @@ func ShowWords(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
-  enableKafkaPtr := flag.Bool("enableKafka", false, "Whether to use Kafka messaging.")
   enableRedisPtr := flag.Bool("enableRedis", false, "Whether to enable Redis session store.")
-  kafkaBrokerServerPtr := flag.String("kafkaBrokerServer", "host.docker.internal:9092", "The kafka broker information.")
-  kafkaTopicPtr := flag.String("kafkaTopic", "AwsChatTopic", "The kafka topic")
   sessionStorePtr := flag.String("sessionStoreAddr", "host.docker.internal:6379", "Address of the session store.")
   pushPortPtr := flag.Int("pushPort", 8080, "Port on which to accept message pushes")
   userPortPtr := flag.Int("userPort", 3000, "Port on which to accept user traffic")
@@ -327,33 +231,6 @@ func main() {
         Password: "", // no password set
         DB:       0,  // use default DB
     })
-  }
-
-  enableKafka = *enableKafkaPtr
-  if (enableKafka) {
-    topics = []string{*kafkaTopicPtr}
-
-    producerPtr, err := CreateProducer(*kafkaBrokerServerPtr)
-    if err != nil {
-      panic(err)
-    }
-    producer = producerPtr
-    go HandleProduceEvent(producer)
-
-    // Uncomment to verify that a single, local publish works.
-    // SynchronousProduce(producer, topics[0], "Sync pub")
-
-    // Uncomment to verify that a single async message publish works.
-    // deliveryChan := make(chan kafka.Event, 10000)
-    // err = ProduceMessage(producer, deliveryChan, "Hello world!", topics[0])
-    //if err != nil {
-    //  panic(err)
-    //} else {
-    //  fmt.Println("Successfully produced message.")
-    //}
-    fmt.Println("Initialized Kafka producer.")
-  } else {
-    fmt.Println("Skipping kafka initialization")
   }
 
   enableDatabase = *enableDatabasePtr

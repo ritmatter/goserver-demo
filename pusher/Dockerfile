@@ -13,4 +13,4 @@ COPY *.go ./
 
 RUN go build -tags musl -o /pusher
 
-CMD ["sh", "-c", "/pusher"]
+CMD ["sh", "-c", "/pusher --enableRedis --kafkaTopic=database-1.public.messages"]

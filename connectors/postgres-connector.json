@@ -1,0 +1,15 @@
+{
+  "name": "messages-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "192.168.86.51",
+    "database.port": "5433",
+    "database.user": "postgres",
+    "database.password": "postgres",
+    "database.dbname" : "postgres",
+    "database.server.name": "database-1",
+    "table.include.list": "public.messages",
+    "plugin.name": "pgoutput",
+    "tasks.max": 1
+  }
+}

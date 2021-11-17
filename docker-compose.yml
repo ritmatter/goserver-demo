@@ -6,13 +6,25 @@ services:
       - "3000:3000"
       - "8080:8080"
     links:
-      - kafka
       - redis
       - postgres
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      POSTGRES_HOST: ${HOST_IP}
+      POSTGRES_PORT: "5433"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+      POSTGRES_DBNAME: "postgres"
   pusher:
     build: ./pusher
     links:
       - kafka
+      - redis
+    depends_on:
+      - kafka
+      - postgres-connector
       - redis
   zookeeper:
     image: debezium/zookeeper:1.6
@@ -36,7 +48,7 @@ services:
   postgres:
     image: postgres
     ports:
-      - 5433:5432
+      - "5433:5432"
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
@@ -44,12 +56,25 @@ services:
       - "postgres"
       - "-c"
       - "wal_level=logical"
+    volumes:
+      # Uncomment to persist data.
+      #- ./postgres-data:/var/lib/postgresql/data
+      # copy the sql script to create tables
+      - ./sql/create_tables.sql:/docker-entrypoint-initdb.d/create_tables.sql
+      - ./sql/fill_tables.sql:/docker-entrypoint-initdb.d/fill_tables.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   redis:
     image: "redis:alpine"
+    ports:
+      - "6379:6379"
   postgres-connector:
     image: debezium/connect:1.6
     ports:
-      - 9090:8083
+      - "9090:8083"
     links:
       - kafka
     depends_on:

@@ -60,7 +60,19 @@ func main() {
     ev := consumer.Poll(100)
     switch e := ev.(type) {
       case *kafka.Message:
-        fmt.Printf("%% Message on %s:\n%s\n", e.TopicPartition, string(e.Value))
+        fmt.Println("%% Message on %s:\n%s\n", e.TopicPartition, string(e.Value))
+
+        var message_json map[string]interface{}
+        json.Unmarshal(e.Value, &message_json)
+        payload := message_json["payload"].(map[string]interface{})
+        op := payload["op"].(string)
+        if op != "c" {
+          fmt.Println("Skipping message with op %s", op)
+        }
+
+        after := payload["after"].(map[string]interface{})
+        text := after["text"].(string)
+        fmt.Println("Extracted text: %s", text) 
 
         if rdb != nil {
           // TODO: Support more chat rooms than just "public".
@@ -72,7 +84,7 @@ func main() {
           for _, address := range addresses {
            fmt.Println(address)
            postBody, _ := json.Marshal(map[string]string{
-              "message":  string(e.Value),
+              "message": text,
            })
            requestBody := bytes.NewBuffer(postBody)
            resp, err := http.Post("http://" + address, "application/json", requestBody)
