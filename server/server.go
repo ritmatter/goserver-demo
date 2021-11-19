@@ -2,6 +2,7 @@ package main
 import (
   "context"
   "database/sql"
+  "encoding/json"
   "flag"
   "fmt"
   _ "github.com/lib/pq"
@@ -48,6 +49,11 @@ const (
 
 type PushRequest struct {
     message map[string]string
+}
+
+type Channel struct {
+  Id string
+  Name string
 }
 
 // Writes a message into the database.
@@ -159,29 +165,56 @@ func HandlePush(w http.ResponseWriter, req *http.Request) {
   fmt.Fprint(w, "Push OK.")
 }
 
-func ShowWords(w http.ResponseWriter, req *http.Request) {
-  fmt.Println("Inside ShowWords handler")
+func ListChannels(w http.ResponseWriter, req *http.Request) {
+  if !enableDatabase {
+    return
+  }
 
-  if (enableDatabase) {
-    sqlStatement := "SELECT * From words"
-    rows, err := db.Query(sqlStatement)
-    if err != nil {
-      panic(err)
+  sqlStatement := "SELECT * From channels;"
+  rows, err := db.Query(sqlStatement)
+  if err != nil {
+    panic(err)
+  }
+  defer rows.Close()
+
+  channels := make([]Channel, 0)
+  for rows.Next() {
+    var channel Channel
+    // if err := rows.Scan(&channel.id, &channel.name); err != nil {
+    if err := rows.Scan(&channel.Id, &channel.Name); err != nil {
+      log.Fatal(err)
     }
-    defer rows.Close()
+    channels = append(channels, channel)
+  }
+  fmt.Fprint(w, channels)
+}
 
+func CreateChannel(w http.ResponseWriter, req *http.Request) {
+  if !enableDatabase {
+    return
+  }
 
-    words := make([]string, 0)
-    for rows.Next() {
-      var word string
-      if err := rows.Scan(&word); err != nil {
-        log.Fatal(err)
-      }
-      words = append(words, word)
-    }
-    fmt.Fprint(w, words)
+  var channel Channel
+
+  // Try to decode the request body into the struct. If there is an error,
+  // respond to the client with the error message and a 400 status code.
+  dec := json.NewDecoder(req.Body)
+  dec.DisallowUnknownFields()
+  err := dec.Decode(&channel)
+  if err != nil {
+      http.Error(w, err.Error(), http.StatusBadRequest)
+      return
+  }
+
+  sqlStatement := `
+  INSERT INTO channels (name)
+  VALUES ($1)`
+
+  _, err = db.Exec(sqlStatement, channel.Name)
+  if err != nil {
+    fmt.Fprint(w, err)
   } else {
-    fmt.Fprint(w, "Database disabled")
+    fmt.Fprint(w, "OK")
   }
 }
 
@@ -264,8 +297,9 @@ func main() {
 
   mxUserHttp := http.NewServeMux()
   mxUserHttp.Handle("/", http.FileServer(http.Dir(".")))
-  mxUserHttp.HandleFunc("/words", ShowWords)
   mxUserHttp.HandleFunc("/ws", OpenWebsocket)
+  mxUserHttp.HandleFunc("/channels", ListChannels)
+  mxUserHttp.HandleFunc("/channels/new", CreateChannel)
   go func() {
     userPort := *userPortPtr
     err := http.ListenAndServe(":" + strconv.Itoa(userPort), mxUserHttp)
