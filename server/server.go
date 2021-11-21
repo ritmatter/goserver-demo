@@ -52,8 +52,8 @@ type PushRequest struct {
 }
 
 type Channel struct {
-  Id string
-  Name string
+  Id string `json:"id"`
+  Name string `json:"name"`
 }
 
 // Writes a message into the database.
@@ -186,7 +186,9 @@ func ListChannels(w http.ResponseWriter, req *http.Request) {
     }
     channels = append(channels, channel)
   }
-  fmt.Fprint(w, channels)
+
+  out, _ := json.Marshal(channels)
+  fmt.Fprint(w, string(out))
 }
 
 func CreateChannel(w http.ResponseWriter, req *http.Request) {
