@@ -215,8 +215,6 @@ func CreateChannel(w http.ResponseWriter, req *http.Request) {
   _, err = db.Exec(sqlStatement, channel.Name)
   if err != nil {
     fmt.Fprint(w, err)
-  } else {
-    fmt.Fprint(w, "OK")
   }
 }
 

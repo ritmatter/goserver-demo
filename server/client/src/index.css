@@ -11,3 +11,18 @@ code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
 }
+
+.wrapper {
+    display: flex;
+    width: 100%;
+    align-items: stretch;
+}
+
+#channelsBar {
+    min-width: 250px;
+    max-width: 250px;
+}
+
+#channelsBar.active {
+    margin-left: -250px;
+}
