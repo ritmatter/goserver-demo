@@ -16,3 +16,9 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# Node modules
+*node_modules*
+
+# React build dir.
+server/client/build*

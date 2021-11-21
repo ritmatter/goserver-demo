@@ -27,11 +27,11 @@ services:
       - postgres-connector
       - redis
   zookeeper:
-    image: debezium/zookeeper:1.6
+    image: debezium/zookeeper:1.8
     ports:
       - 2181:2181
   kafka:
-    image: debezium/kafka:1.6
+    image: debezium/kafka:1.8
     ports:
       - "9092:9092"
     links:
@@ -72,7 +72,7 @@ services:
     ports:
       - "6379:6379"
   postgres-connector:
-    image: debezium/connect:1.6
+    image: debezium/connect:1.8
     ports:
       - "9090:8083"
     links:

@@ -298,7 +298,7 @@ func main() {
   }
 
   mxUserHttp := http.NewServeMux()
-  mxUserHttp.Handle("/", http.FileServer(http.Dir(".")))
+  mxUserHttp.Handle("/", http.FileServer(http.Dir("./client/build")))
   mxUserHttp.HandleFunc("/ws", OpenWebsocket)
   mxUserHttp.HandleFunc("/channels", ListChannels)
   mxUserHttp.HandleFunc("/channels/new", CreateChannel)
