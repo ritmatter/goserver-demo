@@ -27,7 +27,28 @@ var upgrader = websocket.Upgrader {
   ReadBufferSize:  1024,
   WriteBufferSize: 1024,
 }
-var conns map[string]*websocket.Conn
+
+type Connection struct {
+  socket *websocket.Conn
+  id string
+  user_id string
+}
+
+func (c Connection) WriteMessage(messageType string, payload string) (err error) {
+  socket_message := SocketMessage{messageType, payload}
+  out, _ := json.Marshal(socket_message)
+  return c.socket.WriteMessage(1, []byte(out))
+}
+
+func (c Connection) Close() {
+  c.socket.Close()
+}
+
+func (c Connection) ReadMessage() (messageType int, p []byte, err error) {
+  return c.socket.ReadMessage()
+}
+
+var conns map[string]*Connection
 
 // Request context.
 var ctx = context.Background()
@@ -54,19 +75,30 @@ type PushRequest struct {
 type Channel struct {
   Id string `json:"id"`
   Name string `json:"name"`
+  CreatedAt time.Time `json:"createdAt"`
+}
+
+type User struct {
+  Id string `json:"id"`
+  Name string `json:"name"`
+}
+
+type SocketMessage struct {
+  Type string `json:"type"`
+  Payload string `json:"payload"`
 }
 
 // Writes a message into the database.
-func PersistMessage(text string) (sql.Result, error)  {
+func PersistMessage(text string, user_id string) (sql.Result, error)  {
   sqlStatement := `
-  INSERT INTO messages (channel_id, text)
-  VALUES ($1, $2)`
+  INSERT INTO messages (channel_id, text, user_id)
+  VALUES ($1, $2, $3)`
 
-  return db.Exec(sqlStatement, defaultChannelId, text)
+  return db.Exec(sqlStatement, defaultChannelId, text, user_id)
 }
 
-// Reader that receives web socket messages
-func reader(conn *websocket.Conn, conn_id string) {
+// Reader that receives web socket messages.
+func reader(conn *Connection, conn_id string, user_id string) {
   for {
     _, p, err := conn.ReadMessage()
     if err != nil {
@@ -76,7 +108,7 @@ func reader(conn *websocket.Conn, conn_id string) {
 
     text := string(p)
     if enableDatabase {
-      _, err = PersistMessage(text)
+      _, err = PersistMessage(text, user_id)
       if err != nil {
         panic(err)
       }
@@ -87,7 +119,7 @@ func reader(conn *websocket.Conn, conn_id string) {
 }
 
 // Handles cleanup when a connection is closed.
-func HandleClose(conn *websocket.Conn, conn_id string) {
+func HandleClose(conn *Connection, conn_id string) {
   conn.Close()
   delete (conns, conn_id)
 
@@ -98,6 +130,12 @@ func HandleClose(conn *websocket.Conn, conn_id string) {
 func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
   // Allow incoming request from another domain to connect (prevent CORS error).
   upgrader.CheckOrigin = func(r *http.Request) bool { return true }
+
+  user_id := req.URL.Query().Get("userId")
+  if user_id == "" {
+      http.Error(w, "userId query param must be provided.", http.StatusBadRequest)
+      return
+  }
 
   // Upgrade the connection to a web socket.
   ws, err := upgrader.Upgrade(w, req, nil)
@@ -123,7 +161,11 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
   log.Println("Client Connected")
 
   conn_id := uuid.New().String()
-  conns[conn_id] = ws
+
+  connection := new(Connection)
+  connection.id = conn_id
+  connection.socket = ws
+  conns[conn_id] = connection
 
   // If redis is enabled, add the client to the session store.
   // TODO: Support adding for specific chat channels, not just "public".
@@ -135,14 +177,8 @@ func OpenWebsocket(w http.ResponseWriter, req *http.Request) {
     }
   }
 
-  // Write a hello message to the client.
-  err = ws.WriteMessage(1, []byte("Greetings client."))
-  if err != nil {
-    log.Println(err)
-  }
-
   // Permanently read from this websocket.
-  reader(ws, conn_id)
+  reader(connection, conn_id, user_id)
 }
 
 func HandlePush(w http.ResponseWriter, req *http.Request) {
@@ -156,13 +192,11 @@ func HandlePush(w http.ResponseWriter, req *http.Request) {
   // TODO: Handle concurrency websocket writes, right now
   // there could be two concurrent pushes.
   for _, conn := range conns {
-    err = conn.WriteMessage(websocket.TextMessage, []byte(body))
+    err = conn.WriteMessage("new_message", string(body))
     if err != nil {
       fmt.Println(err)
     }
   }
-
-  fmt.Fprint(w, "Push OK.")
 }
 
 func ListChannels(w http.ResponseWriter, req *http.Request) {
@@ -180,8 +214,7 @@ func ListChannels(w http.ResponseWriter, req *http.Request) {
   channels := make([]Channel, 0)
   for rows.Next() {
     var channel Channel
-    // if err := rows.Scan(&channel.id, &channel.name); err != nil {
-    if err := rows.Scan(&channel.Id, &channel.Name); err != nil {
+    if err := rows.Scan(&channel.Id, &channel.Name, &channel.CreatedAt); err != nil {
       log.Fatal(err)
     }
     channels = append(channels, channel)
@@ -190,6 +223,34 @@ func ListChannels(w http.ResponseWriter, req *http.Request) {
   out, _ := json.Marshal(channels)
   fmt.Fprint(w, string(out))
 }
+
+func CreateUser(w http.ResponseWriter, req *http.Request) {
+  if !enableDatabase {
+    return
+  }
+
+  var user User
+
+  // Try to decode the request body into the struct. If there is an error,
+  // respond to the client with the error message and a 400 status code.
+  dec := json.NewDecoder(req.Body)
+  dec.DisallowUnknownFields()
+  err := dec.Decode(&user)
+  if err != nil {
+      http.Error(w, err.Error(), http.StatusBadRequest)
+      return
+  }
+
+  sqlStatement := `
+  INSERT INTO users (name)
+  VALUES ($1)`
+
+  _, err = db.Exec(sqlStatement, user.Name)
+  if err != nil {
+    fmt.Fprint(w, err)
+  }
+}
+
 
 func CreateChannel(w http.ResponseWriter, req *http.Request) {
   if !enableDatabase {
@@ -255,7 +316,7 @@ func main() {
   pushPort = *pushPortPtr
   fmt.Println("Got push port: " + strconv.Itoa(pushPort))
 
-  conns = make(map[string]*websocket.Conn)
+  conns = make(map[string]*Connection)
 
   enableRedis := *enableRedisPtr
   if enableRedis {
@@ -300,6 +361,7 @@ func main() {
   mxUserHttp.HandleFunc("/ws", OpenWebsocket)
   mxUserHttp.HandleFunc("/channels", ListChannels)
   mxUserHttp.HandleFunc("/channels/new", CreateChannel)
+  mxUserHttp.HandleFunc("/users/new", CreateUser)
   go func() {
     userPort := *userPortPtr
     err := http.ListenAndServe(":" + strconv.Itoa(userPort), mxUserHttp)

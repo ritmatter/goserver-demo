@@ -5,15 +5,21 @@ import ChannelList from './channel_list.js';
 import Message from './message.js';
 import MessageList from './message_list.js';
 import MessageSender from './message_sender.js';
+import UserStatus from './user_status.js';
 
 class App extends React.Component {
   constructor(props) {
     super(props);
 
-    this.state = {messages: [], channels: []};
+    this.state = {
+      messages: [],
+      channels: [],
+      // TODO: Implement login flow.
+      userId: "9f87ac0f-ec10-4aae-a754-bed9e1cd8272"
+    };
     this.handleNewChannel = this.handleNewChannel.bind(this);
 
-    let socket = new WebSocket("ws://127.0.0.1:3000/ws");
+    let socket = new WebSocket("ws://127.0.0.1:3000/ws?userId=" + this.state.userId);
     console.log("Attempting Connection...");
 
     socket.onopen = () => {
@@ -68,6 +74,7 @@ class App extends React.Component {
       <div className="App">
         <h1>YACA</h1>
 
+        <UserStatus id={this.state.userId} />
         <div className="wrapper">
           <nav id="channelsBar">
             <div className="sidebar-header">
