@@ -17,6 +17,7 @@ services:
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "postgres"
       POSTGRES_DBNAME: "postgres"
+      REDIS_ADDR: "${HOST_IP}:6379"
   pusher:
     build: ./pusher
     links:

@@ -19,7 +19,8 @@ class App extends React.Component {
     };
     this.handleNewChannel = this.handleNewChannel.bind(this);
 
-    let socket = new WebSocket("ws://127.0.0.1:3000/ws?userId=" + this.state.userId);
+    let socket = new WebSocket(
+        "ws://" + window.location.host + "/ws?userId=" + this.state.userId);
     console.log("Attempting Connection...");
 
     socket.onopen = () => {
